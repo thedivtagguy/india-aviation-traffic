@@ -1,0 +1,86 @@
+name: Monthly Data Update
+
+on:
+  schedule:
+    - cron: "0 0 1 * *" # Runs at 00:00 on the first day of every month
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  check-for-updates:
+    runs-on: ubuntu-latest
+    outputs:
+      updates_available: ${{ steps.check_updates.outputs.updates_available }}
+    steps:
+      - uses: actions/checkout@v3
+      - name: Check for updates
+        id: check_updates
+        run: |
+          bash initialize.sh
+          if git diff --exit-code -- urls.txt; then
+            echo "No new data available. Exiting."
+            echo "updates_available=false" >> $GITHUB_OUTPUT
+          else
+            echo "New data available. Proceeding with update."
+            echo "updates_available=true" >> $GITHUB_OUTPUT
+          fi
+
+  fetch-data:
+    needs: check-for-updates
+    if: needs.check-for-updates.outputs.updates_available == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Fetch data
+        run: bash fetch.sh
+      - name: Upload fetched data
+        uses: actions/upload-artifact@v3
+        with:
+          name: fetched-data
+          path: raw/
+
+  process-data:
+    needs: fetch-data
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.x"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnumeric
+          pip install pandas openpyxl
+      - name: Download fetched data
+        uses: actions/download-artifact@v3
+        with:
+          name: fetched-data
+          path: raw/
+      - name: Process and aggregate data
+        run: |
+          bash parse.sh
+          python aggregate.py
+      - name: Upload processed data
+        uses: actions/upload-artifact@v3
+        with:
+          name: processed-data
+          path: aggregated/
+
+  commit-changes:
+    needs: process-data
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Download processed data
+        uses: actions/download-artifact@v3
+        with:
+          name: processed-data
+          path: aggregated/
+      - name: Commit and push changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add aggregated/
+          git commit -m "Monthly data update $(date +'%Y-%m-%d')"
+          git push
